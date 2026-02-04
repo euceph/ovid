@@ -6,22 +6,31 @@ Fast, bidirectional PDF to image converter and image to PDF merger. A replacemen
 
 ## Install
 
-### Build dependencies
+**Pre-built binaries (macOS & Linux):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/euceph/ovid/main/install.sh | sh
+```
+
+**Cargo:**
+```bash
+cargo install ovid
+```
+
+<details>
+<summary>Build from source</summary>
 
 **macOS:**
 ```bash
-brew install jpeg-turbo
+brew install nasm jpeg-turbo
+cargo install --path .
 ```
 
 **Linux (Debian/Ubuntu):**
 ```bash
 apt install cmake nasm libclang-dev libfontconfig1-dev libjpeg-turbo8-dev pkg-config
-```
-
-Then:
-```
 cargo install --path .
 ```
+</details>
 
 ## Usage
 
