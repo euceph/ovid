@@ -7,6 +7,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "fast, bidirectional PDF and Image converter"
+repository = "https://github.com/euceph/ovid"
+keywords = ["pdf", "image", "converter", "png", "cli"]
+categories = ["command-line-utilities", "multimedia::images"]
 
 [dependencies]
 turbojpeg = "1.3"
