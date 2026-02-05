@@ -49,8 +49,8 @@ ovid split document.pdf --gray
 # Single page to stdout (pipe to other tools)
 ovid split document.pdf -o - --pages 3 > page3.png
 
-# Smaller files with adaptive PNG filtering (slower)
-ovid split document.pdf --optimize
+# Smaller PNG files (~2.5x smaller, ~20% slower)
+ovid split document.pdf -c small
 
 # JPEG quality control
 ovid split document.pdf -f jpg --quality 90
