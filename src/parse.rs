@@ -74,12 +74,32 @@ pub fn parse_page_ranges(s: &str, num_pages: i32) -> Result<Vec<i32>> {
     Ok(pages)
 }
 
-/// expand dirs in input list into sorted image files
+/// check if a path string contains glob pattern characters
+fn is_glob_pattern(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
+}
+
+/// expand dirs and glob patterns in input list into sorted image files
 pub fn expand_image_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "tiff", "tif", "bmp", "gif"];
     let mut result = Vec::new();
     for path in paths {
-        if path.is_dir() {
+        let path_str = path.to_string_lossy();
+        if is_glob_pattern(&path_str) {
+            // expand glob pattern
+            let mut entries: Vec<PathBuf> = glob::glob(&path_str)
+                .with_context(|| format!("Invalid glob pattern: {}", path_str))?
+                .filter_map(|e| e.ok())
+                .filter(|p| p.is_file())
+                .collect();
+            entries.sort();
+            anyhow::ensure!(
+                !entries.is_empty(),
+                "No files matched pattern: {}",
+                path_str
+            );
+            result.extend(entries);
+        } else if path.is_dir() {
             let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
                 .with_context(|| format!("Cannot read directory: {}", path.display()))?
                 .filter_map(|e| e.ok())

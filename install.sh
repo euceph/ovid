@@ -4,6 +4,42 @@ set -e
 REPO="euceph/ovid"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
+install_jpeg_turbo() {
+    OS="$(uname -s)"
+
+    case "$OS" in
+        Darwin)
+            if ! brew list jpeg-turbo &>/dev/null 2>&1; then
+                echo "Installing libjpeg-turbo via Homebrew..."
+                if command -v brew &>/dev/null; then
+                    brew install jpeg-turbo
+                else
+                    echo "Warning: Homebrew not found. Please install libjpeg-turbo manually:"
+                    echo "  brew install jpeg-turbo"
+                    echo ""
+                fi
+            fi
+            ;;
+        Linux)
+            if ! ldconfig -p 2>/dev/null | grep -q libturbojpeg; then
+                echo "libjpeg-turbo not found. Attempting to install..."
+                if command -v apt-get &>/dev/null; then
+                    sudo apt-get update && sudo apt-get install -y libturbojpeg0
+                elif command -v dnf &>/dev/null; then
+                    sudo dnf install -y libjpeg-turbo
+                elif command -v yum &>/dev/null; then
+                    sudo yum install -y libjpeg-turbo
+                elif command -v pacman &>/dev/null; then
+                    sudo pacman -S --noconfirm libjpeg-turbo
+                else
+                    echo "Warning: Could not detect package manager. Please install libjpeg-turbo manually."
+                    echo ""
+                fi
+            fi
+            ;;
+    esac
+}
+
 detect_platform() {
     OS="$(uname -s)"
     ARCH="$(uname -m)"
@@ -28,6 +64,8 @@ get_latest_version() {
 }
 
 main() {
+    install_jpeg_turbo
+
     PLATFORM="$(detect_platform)"
     VERSION="${VERSION:-$(get_latest_version)}"
 

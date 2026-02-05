@@ -248,15 +248,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e64b0cc0439b12df2fa678eae89a1c56a529fd067a9115f7827f1fffd22b32"
 
 [[package]]
-name = "cmake"
-version = "0.1.57"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -838,8 +829,7 @@ dependencies = [
 [[package]]
 name = "mupdf"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a60c91abaf541e5291ca470efcb7d80d0ad834dcca7fa8f8576aa789a9813b1"
+source = "git+https://github.com/messense/mupdf-rs.git#d7441b9998c92135e329559c0aa71d9dc92cf4de"
 dependencies = [
  "bitflags 2.10.0",
  "font-kit",
@@ -851,8 +841,7 @@ dependencies = [
 [[package]]
 name = "mupdf-sys"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "182cb40642a37e5980a03285664c2c100f5dbde781165c137fd49ff9c06fd5c5"
+source = "git+https://github.com/messense/mupdf-rs.git#d7441b9998c92135e329559c0aa71d9dc92cf4de"
 dependencies = [
  "bindgen",
  "cc",
@@ -912,6 +901,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "flate2",
+ "glob",
  "image",
  "lopdf",
  "mimalloc",
@@ -1253,7 +1243,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2d87290369f91af10f425f9ec0b8ce775cf79ea189291faa974c0b4e02e1e2f"
 dependencies = [
  "anyhow",
- "cmake",
  "libc",
  "pkg-config",
 ]
