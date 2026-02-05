@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/euceph/ovid/main/install.sh | sh
 
 **Cargo:**
 ```bash
-# Requires libjpeg-turbo: brew install jpeg-turbo (macOS) or apt install libturbojpeg0 (Linux)
+# Requires libjpeg-turbo >= 3.0
 cargo install ovid
 ```
 

@@ -23,16 +23,14 @@ install_jpeg_turbo() {
         Linux)
             if ! ldconfig -p 2>/dev/null | grep -q libturbojpeg; then
                 echo "libjpeg-turbo not found. Attempting to install..."
-                if command -v apt-get &>/dev/null; then
-                    sudo apt-get update && sudo apt-get install -y libturbojpeg0
+                if command -v pacman &>/dev/null; then
+                    sudo pacman -S --noconfirm libjpeg-turbo
                 elif command -v dnf &>/dev/null; then
                     sudo dnf install -y libjpeg-turbo
-                elif command -v yum &>/dev/null; then
-                    sudo yum install -y libjpeg-turbo
-                elif command -v pacman &>/dev/null; then
-                    sudo pacman -S --noconfirm libjpeg-turbo
+                elif command -v apt-get &>/dev/null; then
+                    sudo apt-get update && sudo apt-get install -y libturbojpeg
                 else
-                    echo "Warning: Could not detect package manager. Please install libjpeg-turbo manually."
+                    echo "Warning: Could not detect package manager. Please install libjpeg-turbo >= 3.0"
                     echo ""
                 fi
             fi
