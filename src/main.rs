@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-use parse::{ImageFormat, PageSize};
+use parse::{ImageFormat, PageSize, PngCompression};
 
 #[derive(Parser)]
 #[command(name = "ovid", version, about = "Lightning-fast PDF / Image converter")]
@@ -45,9 +45,9 @@ enum Commands {
         #[arg(short, long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(72..=2400))]
         dpi: u32,
 
-        /// full adaptive PNG filtering (smaller files, slower encoding)
-        #[arg(long)]
-        optimize: bool,
+        /// PNG compression: fast (speed) or small (filesize)
+        #[arg(short, long, default_value = "fast")]
+        compress: PngCompression,
 
         /// render in grayscale
         #[arg(long)]
@@ -111,7 +111,7 @@ fn main() -> Result<()> {
             output,
             format,
             dpi,
-            optimize,
+            compress,
             gray,
             pages,
             quality,
@@ -127,7 +127,7 @@ fn main() -> Result<()> {
                 &output_dir,
                 format,
                 dpi,
-                optimize,
+                compress,
                 gray,
                 pages.as_deref(),
                 quality,

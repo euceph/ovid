@@ -8,6 +8,16 @@ pub enum ImageFormat {
     Jpg,
 }
 
+/// PNG compression level
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum PngCompression {
+    /// fastest encoding, larger files
+    #[default]
+    Fast,
+    /// smaller files, slower encoding
+    Small,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum PageSize {
     A4,

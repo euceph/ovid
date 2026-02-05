@@ -4,14 +4,14 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::parse::{parse_page_ranges, ImageFormat};
+use crate::parse::{parse_page_ranges, ImageFormat, PngCompression};
 
 fn encode_png(
     data: &[u8],
     width: u32,
     height: u32,
     gray: bool,
-    optimize: bool,
+    compress: PngCompression,
     writer: impl Write,
 ) -> Result<()> {
     let writer = std::io::BufWriter::new(writer);
@@ -22,12 +22,20 @@ fn encode_png(
         png::ColorType::Rgb
     });
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Fast);
-    encoder.set_filter(if optimize {
-        png::Filter::Adaptive
-    } else {
-        png::Filter::Paeth
-    });
+
+    // set compression and filter based on level:
+    // - fast: fastest encoding, larger files (fdeflate + Paeth)
+    // - small: smaller files, slower encoding (zlib + NoFilter)
+    match compress {
+        PngCompression::Fast => {
+            encoder.set_compression(png::Compression::Fast);
+            encoder.set_filter(png::Filter::Paeth);
+        }
+        PngCompression::Small => {
+            encoder.set_compression(png::Compression::Balanced);
+            encoder.set_filter(png::Filter::NoFilter);
+        }
+    }
 
     let mut writer = encoder
         .write_header()
@@ -75,7 +83,7 @@ pub fn split_pdf(
     output_dir: &Path,
     format: ImageFormat,
     dpi: u32,
-    optimize: bool,
+    compress: PngCompression,
     gray: bool,
     pages: Option<&str>,
     quality: u8,
@@ -119,7 +127,7 @@ pub fn split_pdf(
         let out = stdout.lock();
         match format {
             ImageFormat::Png => {
-                encode_png(pixmap.samples(), width, height, gray, optimize, out)?;
+                encode_png(pixmap.samples(), width, height, gray, compress, out)?;
             }
             ImageFormat::Jpg => {
                 encode_jpg(pixmap.samples(), width, height, gray, quality, out)?;
@@ -211,7 +219,7 @@ pub fn split_pdf(
                                     width,
                                     height,
                                     gray,
-                                    optimize,
+                                    compress,
                                     file,
                                 )?;
                             }
