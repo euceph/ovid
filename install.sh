@@ -9,9 +9,9 @@ install_jpeg_turbo() {
 
     case "$OS" in
         Darwin)
-            if ! brew list jpeg-turbo &>/dev/null 2>&1; then
+            if ! brew list jpeg-turbo >/dev/null 2>&1; then
                 echo "Installing libjpeg-turbo via Homebrew..."
-                if command -v brew &>/dev/null; then
+                if command -v brew >/dev/null 2>&1; then
                     brew install jpeg-turbo
                 else
                     echo "Warning: Homebrew not found. Please install libjpeg-turbo manually:"
@@ -23,12 +23,21 @@ install_jpeg_turbo() {
         Linux)
             if ! ldconfig -p 2>/dev/null | grep -q libturbojpeg; then
                 echo "libjpeg-turbo not found. Attempting to install..."
-                if command -v pacman &>/dev/null; then
+                if command -v pacman >/dev/null 2>&1; then
                     sudo pacman -S --noconfirm libjpeg-turbo
-                elif command -v dnf &>/dev/null; then
+                elif command -v dnf >/dev/null 2>&1; then
                     sudo dnf install -y libjpeg-turbo
-                elif command -v apt-get &>/dev/null; then
-                    sudo apt-get update && sudo apt-get install -y libturbojpeg
+                elif command -v apt-get >/dev/null 2>&1; then
+                    echo "Building libjpeg-turbo 3.x from source..."
+                    sudo apt-get update && sudo apt-get install -y cmake make gcc curl
+                    TMPBUILD="$(mktemp -d)"
+                    curl -sL https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.0/libjpeg-turbo-3.1.0.tar.gz | tar xz -C "$TMPBUILD"
+                    cd "$TMPBUILD/libjpeg-turbo-3.1.0"
+                    cmake -G"Unix Makefiles" -DCMAKE_INSTALL_PREFIX=/usr .
+                    make -j$(nproc)
+                    sudo make install
+                    sudo ldconfig
+                    rm -rf "$TMPBUILD"
                 else
                     echo "Warning: Could not detect package manager. Please install libjpeg-turbo >= 3.0"
                     echo ""
