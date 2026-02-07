@@ -70,9 +70,9 @@ enum Commands {
         #[arg(short, long, default_value = "output.pdf")]
         output: PathBuf,
 
-        /// DPI of input images, used for page sizing (72-2400)
-        #[arg(short, long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(72..=2400))]
-        dpi: u32,
+        /// DPI for page sizing (default: from image metadata, or 300)
+        #[arg(short, long, value_parser = clap::value_parser!(u32).range(72..=2400))]
+        dpi: Option<u32>,
 
         /// PDF title metadata
         #[arg(long)]

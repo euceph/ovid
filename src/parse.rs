@@ -124,13 +124,30 @@ pub fn expand_image_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(result)
 }
 
-/// parse JPEG file's SOF marker to extract (width, height, num_components)
-pub fn parse_jpeg_header(data: &[u8]) -> Result<(u32, u32, u8)> {
+pub struct JpegInfo {
+    pub width: u32,
+    pub height: u32,
+    pub components: u8,
+    /// APP14 Adobe color transform: None = no Adobe marker, Some(0) = CMYK, Some(2) = YCCK
+    pub adobe_color_transform: Option<u8>,
+    /// DPI from JFIF APP0 marker (if present and units==1 for DPI)
+    pub dpi: Option<u32>,
+    /// ICC profile data reassembled from APP2 markers
+    pub icc_profile: Option<Vec<u8>>,
+}
+
+/// parse JPEG file's SOF, APP0, APP2, and APP14 markers
+pub fn parse_jpeg_header(data: &[u8]) -> Result<JpegInfo> {
     anyhow::ensure!(
         data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8,
         "Not a valid JPEG file"
     );
     let mut pos = 2;
+    let mut sof: Option<(u32, u32, u8)> = None;
+    let mut adobe_color_transform: Option<u8> = None;
+    let mut dpi: Option<u32> = None;
+    let mut icc_chunks: Vec<(u8, u8, Vec<u8>)> = Vec::new(); // (seq, total, data)
+
     while pos + 4 < data.len() {
         if data[pos] != 0xFF {
             anyhow::bail!("Invalid JPEG marker at offset {}", pos);
@@ -147,18 +164,81 @@ pub fn parse_jpeg_header(data: &[u8]) -> Result<(u32, u32, u8)> {
             continue;
         }
         let len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
-        // all SOF markers: SOF0-SOF3, SOF5-SOF7, SOF9-SOF11, SOF13-SOF15
-        // (excludes 0xC4=DHT, 0xC8=JPG, 0xCC=DAC)
+        anyhow::ensure!(pos + 2 + len <= data.len(), "Truncated JPEG marker");
+
+        // SOS marker: stop scanning (entropy-coded data follows)
+        if marker == 0xDA {
+            break;
+        }
+
+        // SOF markers
         if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF) {
-            anyhow::ensure!(pos + 2 + len <= data.len() && len >= 8, "Truncated SOF");
+            anyhow::ensure!(len >= 8, "Truncated SOF");
             let height = u16::from_be_bytes([data[pos + 5], data[pos + 6]]) as u32;
             let width = u16::from_be_bytes([data[pos + 7], data[pos + 8]]) as u32;
             let components = data[pos + 9];
-            return Ok((width, height, components));
+            sof = Some((width, height, components));
         }
+
+        // APP0 (JFIF) - DPI
+        if marker == 0xE0 && len >= 14 {
+            let seg = &data[pos + 4..pos + 2 + len];
+            if seg.len() >= 12 && &seg[..5] == b"JFIF\0" {
+                let units = seg[7];
+                let x_density = u16::from_be_bytes([seg[8], seg[9]]) as u32;
+                let y_density = u16::from_be_bytes([seg[10], seg[11]]) as u32;
+                if units == 1 && x_density == y_density && x_density > 0 {
+                    dpi = Some(x_density);
+                } else if units == 2 && x_density == y_density && x_density > 0 {
+                    // dots per cm -> DPI
+                    dpi = Some((x_density as f64 * 2.54) as u32);
+                }
+            }
+        }
+
+        // APP2 - ICC profile chunks (tag: "ICC_PROFILE\0")
+        if marker == 0xE2 && len >= 16 {
+            let seg = &data[pos + 4..pos + 2 + len];
+            if seg.len() >= 14 && &seg[..12] == b"ICC_PROFILE\0" {
+                let seq_no = seg[12];
+                let total = seg[13];
+                icc_chunks.push((seq_no, total, seg[14..].to_vec()));
+            }
+        }
+
+        // APP14 (Adobe) - color transform
+        if marker == 0xEE && len >= 12 {
+            let seg = &data[pos + 4..pos + 2 + len];
+            if seg.len() >= 12 && &seg[..5] == b"Adobe" {
+                adobe_color_transform = Some(seg[11]);
+            }
+        }
+
         pos += 2 + len;
     }
-    anyhow::bail!("No SOF marker found in JPEG")
+
+    let (width, height, components) = sof.context("No SOF marker found in JPEG")?;
+
+    // reassemble ICC profile from chunks
+    let icc_profile = if !icc_chunks.is_empty() {
+        icc_chunks.sort_by_key(|(seq, _, _)| *seq);
+        let mut profile = Vec::new();
+        for (_, _, chunk_data) in &icc_chunks {
+            profile.extend_from_slice(chunk_data);
+        }
+        Some(profile)
+    } else {
+        None
+    };
+
+    Ok(JpegInfo {
+        width,
+        height,
+        components,
+        adobe_color_transform,
+        dpi,
+        icc_profile,
+    })
 }
 
 pub struct PngInfo {
@@ -166,8 +246,14 @@ pub struct PngInfo {
     pub height: u32,
     pub bit_depth: u8,
     pub color_type: u8,
+    pub interlace: u8,
     pub idat_data: Vec<u8>,
     pub plte_data: Vec<u8>,
+    pub has_trns: bool,
+    /// DPI from pHYs chunk (if units == 1, meters -> DPI)
+    pub dpi: Option<u32>,
+    /// ICC profile from iCCP chunk (decompressed)
+    pub icc_profile: Option<Vec<u8>>,
 }
 
 /// parse a PNG file to extract IHDR info and concatenated IDAT chunk data
@@ -183,8 +269,12 @@ pub fn parse_png_header(data: &[u8]) -> Result<PngInfo> {
     let mut height = 0u32;
     let mut bit_depth = 0u8;
     let mut color_type = 0u8;
+    let mut interlace = 0u8;
     let mut idat_data = Vec::new();
     let mut plte_data = Vec::new();
+    let mut has_trns = false;
+    let mut dpi: Option<u32> = None;
+    let mut icc_profile: Option<Vec<u8>> = None;
     let mut got_ihdr = false;
 
     while pos + 8 <= data.len() {
@@ -202,9 +292,33 @@ pub fn parse_png_header(data: &[u8]) -> Result<PngInfo> {
             height = u32::from_be_bytes([d[4], d[5], d[6], d[7]]);
             bit_depth = d[8];
             color_type = d[9];
+            interlace = d[12];
             got_ihdr = true;
         } else if chunk_type == b"PLTE" {
             plte_data.extend_from_slice(&data[chunk_data_start..chunk_data_start + chunk_len]);
+        } else if chunk_type == b"tRNS" {
+            has_trns = true;
+        } else if chunk_type == b"pHYs" && chunk_len >= 9 {
+            let d = &data[chunk_data_start..];
+            let x_ppu = u32::from_be_bytes([d[0], d[1], d[2], d[3]]);
+            let y_ppu = u32::from_be_bytes([d[4], d[5], d[6], d[7]]);
+            let unit = d[8];
+            if unit == 1 && x_ppu == y_ppu && x_ppu > 0 {
+                // unit 1 = meter, convert to DPI
+                dpi = Some((x_ppu as f64 / 39.3701).round() as u32);
+            }
+        } else if chunk_type == b"iCCP" && chunk_len > 2 {
+            let d = &data[chunk_data_start..chunk_data_start + chunk_len];
+            // iCCP: profile name (null-terminated) + compression method (1 byte) + compressed data
+            if let Some(null_pos) = d.iter().position(|&b| b == 0) {
+                if null_pos + 2 < d.len() {
+                    // d[null_pos + 1] is compression method (always 0 = deflate)
+                    let compressed = &d[null_pos + 2..];
+                    if let Ok(decompressed) = decompress_zlib(compressed) {
+                        icc_profile = Some(decompressed);
+                    }
+                }
+            }
         } else if chunk_type == b"IDAT" {
             idat_data.extend_from_slice(&data[chunk_data_start..chunk_data_start + chunk_len]);
         } else if chunk_type == b"IEND" {
@@ -222,9 +336,23 @@ pub fn parse_png_header(data: &[u8]) -> Result<PngInfo> {
         height,
         bit_depth,
         color_type,
+        interlace,
         idat_data,
         plte_data,
+        has_trns,
+        dpi,
+        icc_profile,
     })
+}
+
+/// decompress zlib-compressed data
+fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    let mut decoder = ZlibDecoder::new(data);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -348,22 +476,24 @@ mod tests {
     #[test]
     fn jpeg_header_rgb() {
         let data = make_minimal_jpeg(640, 480, 3);
-        let (w, h, c) = parse_jpeg_header(&data).unwrap();
-        assert_eq!((w, h, c), (640, 480, 3));
+        let info = parse_jpeg_header(&data).unwrap();
+        assert_eq!((info.width, info.height, info.components), (640, 480, 3));
+        assert_eq!(info.adobe_color_transform, None);
+        assert_eq!(info.dpi, None);
     }
 
     #[test]
     fn jpeg_header_grayscale() {
         let data = make_minimal_jpeg(100, 200, 1);
-        let (w, h, c) = parse_jpeg_header(&data).unwrap();
-        assert_eq!((w, h, c), (100, 200, 1));
+        let info = parse_jpeg_header(&data).unwrap();
+        assert_eq!((info.width, info.height, info.components), (100, 200, 1));
     }
 
     #[test]
     fn jpeg_header_large_dimensions() {
         let data = make_minimal_jpeg(4096, 3000, 3);
-        let (w, h, c) = parse_jpeg_header(&data).unwrap();
-        assert_eq!((w, h, c), (4096, 3000, 3));
+        let info = parse_jpeg_header(&data).unwrap();
+        assert_eq!((info.width, info.height, info.components), (4096, 3000, 3));
     }
 
     #[test]
@@ -388,8 +518,8 @@ mod tests {
             buf.push(0);
         }
         buf.extend_from_slice(&[0xFF, 0xD9]);
-        let (w, h, c) = parse_jpeg_header(&buf).unwrap();
-        assert_eq!((w, h, c), (640, 480, 3));
+        let info = parse_jpeg_header(&buf).unwrap();
+        assert_eq!((info.width, info.height, info.components), (640, 480, 3));
     }
 
     #[test]
@@ -409,8 +539,76 @@ mod tests {
             buf.push(0);
         }
         buf.extend_from_slice(&[0xFF, 0xD9]);
-        let (w, h, c) = parse_jpeg_header(&buf).unwrap();
-        assert_eq!((w, h, c), (1024, 768, 3));
+        let info = parse_jpeg_header(&buf).unwrap();
+        assert_eq!((info.width, info.height, info.components), (1024, 768, 3));
+    }
+
+    #[test]
+    fn jpeg_header_with_jfif_dpi() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0xFF, 0xD8]);
+        // APP0 JFIF with 300 DPI
+        buf.extend_from_slice(&[0xFF, 0xE0]);
+        let mut app0 = Vec::new();
+        app0.extend_from_slice(b"JFIF\0"); // identifier
+        app0.extend_from_slice(&[1, 1]); // version 1.1
+        app0.push(1); // units = DPI
+        app0.extend_from_slice(&300u16.to_be_bytes()); // X density
+        app0.extend_from_slice(&300u16.to_be_bytes()); // Y density
+        app0.extend_from_slice(&[0, 0]); // thumbnail
+        let app0_len = (app0.len() + 2) as u16;
+        buf.extend_from_slice(&app0_len.to_be_bytes());
+        buf.extend_from_slice(&app0);
+        // SOF
+        let sof_len: u16 = 8 + 3 * 3;
+        buf.extend_from_slice(&[0xFF, 0xC0]);
+        buf.extend_from_slice(&sof_len.to_be_bytes());
+        buf.push(8);
+        buf.extend_from_slice(&480u16.to_be_bytes());
+        buf.extend_from_slice(&640u16.to_be_bytes());
+        buf.push(3);
+        for i in 0..3u8 {
+            buf.push(i + 1);
+            buf.push(0x11);
+            buf.push(0);
+        }
+        buf.extend_from_slice(&[0xFF, 0xD9]);
+        let info = parse_jpeg_header(&buf).unwrap();
+        assert_eq!(info.dpi, Some(300));
+    }
+
+    #[test]
+    fn jpeg_header_with_adobe_app14() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0xFF, 0xD8]);
+        // APP14 Adobe marker with color transform = 2 (YCCK)
+        buf.extend_from_slice(&[0xFF, 0xEE]);
+        let mut app14 = Vec::new();
+        app14.extend_from_slice(b"Adobe");
+        app14.extend_from_slice(&[1, 0]); // version
+        app14.extend_from_slice(&[0, 0]); // flags0
+        app14.extend_from_slice(&[0, 0]); // flags1
+        app14.push(2); // color transform: 2 = YCCK
+        let app14_len = (app14.len() + 2) as u16;
+        buf.extend_from_slice(&app14_len.to_be_bytes());
+        buf.extend_from_slice(&app14);
+        // SOF with 4 components
+        let sof_len: u16 = 8 + 3 * 4;
+        buf.extend_from_slice(&[0xFF, 0xC0]);
+        buf.extend_from_slice(&sof_len.to_be_bytes());
+        buf.push(8);
+        buf.extend_from_slice(&100u16.to_be_bytes());
+        buf.extend_from_slice(&100u16.to_be_bytes());
+        buf.push(4);
+        for i in 0..4u8 {
+            buf.push(i + 1);
+            buf.push(0x11);
+            buf.push(0);
+        }
+        buf.extend_from_slice(&[0xFF, 0xD9]);
+        let info = parse_jpeg_header(&buf).unwrap();
+        assert_eq!(info.adobe_color_transform, Some(2));
+        assert_eq!(info.components, 4);
     }
 
     #[test]
@@ -519,6 +717,8 @@ mod tests {
         assert_eq!(info.height, 8);
         assert_eq!(info.color_type, 2);
         assert_eq!(info.bit_depth, 8);
+        assert_eq!(info.interlace, 0);
+        assert!(!info.has_trns);
         assert!(!info.idat_data.is_empty());
         assert!(info.plte_data.is_empty());
     }

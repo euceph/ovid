@@ -11,7 +11,11 @@ enum PreparedImage {
         width: u32,
         height: u32,
         components: u8,
+        /// true if CMYK values need inversion
+        invert_cmyk: bool,
         data: Vec<u8>,
+        dpi: Option<u32>,
+        icc_profile: Option<Vec<u8>>,
     },
     PngPassthrough {
         info: PngInfo,
@@ -23,6 +27,8 @@ enum PreparedImage {
         color_channels: u8,
         color_compressed: Vec<u8>,
         alpha_compressed: Option<Vec<u8>>,
+        dpi: Option<u32>,
+        icc_profile: Option<Vec<u8>>,
     },
 }
 
@@ -34,26 +40,44 @@ fn prepare_image(path: &Path) -> Result<PreparedImage> {
 
     // JPEG: passthrough
     if data[0] == 0xFF && data[1] == 0xD8 {
-        let (w, h, components) = parse_jpeg_header(&data)
+        let jpeg_info = parse_jpeg_header(&data)
             .with_context(|| format!("Failed to parse JPEG header: {}", path.display()))?;
         anyhow::ensure!(
-            matches!(components, 1 | 3 | 4),
+            matches!(jpeg_info.components, 1 | 3 | 4),
             "Unsupported JPEG component count {} in {}",
-            components,
+            jpeg_info.components,
             path.display()
         );
+        // determine CMYK inversion
+        // with transform=2 (YCCK), or when no Adobe marker
+        let invert_cmyk = jpeg_info.components == 4
+            && match jpeg_info.adobe_color_transform {
+                Some(0) => false, // explicit non-inverted CMYK
+                Some(_) => true,  // transform 2 = YCCK
+                None => true,     // no Adobe marker
+            };
         return Ok(PreparedImage::Jpeg {
-            width: w,
-            height: h,
-            components,
+            width: jpeg_info.width,
+            height: jpeg_info.height,
+            components: jpeg_info.components,
+            invert_cmyk,
             data,
+            dpi: jpeg_info.dpi,
+            icc_profile: jpeg_info.icc_profile,
         });
     }
 
-    // PNG: passthrough for opaque, decode+split for alpha
+    // PNG: passthrough for opaque non-interlaced without tRNS, decode otherwise
     if data.len() >= 8 && data[..8] == [137, 80, 78, 71, 13, 10, 26, 10] {
         let info = parse_png_header(&data)
             .with_context(|| format!("Failed to parse PNG header: {}", path.display()))?;
+
+        // interlaced or tRNS PNGs cannot use IDAT passthrough, so full decode required
+        let needs_full_decode = info.interlace != 0 || info.has_trns;
+
+        if needs_full_decode {
+            return decode_generic_image(&data, path, info.dpi, info.icc_profile);
+        }
 
         match info.color_type {
             0 | 2 | 3 => {
@@ -78,7 +102,7 @@ fn prepare_image(path: &Path) -> Result<PreparedImage> {
     }
 
     // generic image formats (TIFF, BMP, GIF, etc.) decode via image crate
-    decode_generic_image(&data, path)
+    decode_generic_image(&data, path, None, None)
 }
 
 /// decode a PNG with alpha channel, split color+alpha, compress separately
@@ -139,11 +163,18 @@ fn decode_alpha_png(data: &[u8], info: &PngInfo, path: &Path) -> Result<Prepared
         color_channels: color_channels as u8,
         color_compressed,
         alpha_compressed: Some(alpha_compressed),
+        dpi: info.dpi,
+        icc_profile: info.icc_profile.clone(),
     })
 }
 
 /// decode any image format via image crate and compress for PDF embedding
-fn decode_generic_image(data: &[u8], path: &Path) -> Result<PreparedImage> {
+fn decode_generic_image(
+    data: &[u8],
+    path: &Path,
+    dpi: Option<u32>,
+    icc_profile: Option<Vec<u8>>,
+) -> Result<PreparedImage> {
     use flate2::write::ZlibEncoder;
     use flate2::Compression;
 
@@ -178,6 +209,8 @@ fn decode_generic_image(data: &[u8], path: &Path) -> Result<PreparedImage> {
             color_channels: 3,
             color_compressed: color_enc.finish()?,
             alpha_compressed: Some(alpha_enc.finish()?),
+            dpi,
+            icc_profile,
         })
     } else if img.color().channel_count() == 1 {
         let gray = img.into_luma8();
@@ -195,6 +228,8 @@ fn decode_generic_image(data: &[u8], path: &Path) -> Result<PreparedImage> {
             color_channels: 1,
             color_compressed: enc.finish()?,
             alpha_compressed: None,
+            dpi,
+            icc_profile,
         })
     } else {
         let rgb = img.into_rgb8();
@@ -212,6 +247,8 @@ fn decode_generic_image(data: &[u8], path: &Path) -> Result<PreparedImage> {
             color_channels: 3,
             color_compressed: enc.finish()?,
             alpha_compressed: None,
+            dpi,
+            icc_profile,
         })
     }
 }
@@ -219,7 +256,7 @@ fn decode_generic_image(data: &[u8], path: &Path) -> Result<PreparedImage> {
 pub fn merge_images(
     images: &[PathBuf],
     output: &Path,
-    dpi: u32,
+    cli_dpi: Option<u32>,
     quiet: bool,
     title: Option<&str>,
     author: Option<&str>,
@@ -244,34 +281,62 @@ pub fn merge_images(
     let pages_id = doc.new_object_id();
     let mut page_ids: Vec<Object> = Vec::with_capacity(images.len());
 
+    /// helper - build an ICCBased color space object from profile data
+    fn make_icc_color_space(
+        doc: &mut Document,
+        icc_data: &[u8],
+        num_components: u8,
+    ) -> Object {
+        let icc_stream = Stream::new(
+            dictionary! {
+                "N" => num_components as i64,
+                "Filter" => Object::Name(b"FlateDecode".to_vec()),
+            },
+            {
+                use flate2::write::ZlibEncoder;
+                use flate2::Compression;
+                let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
+                enc.write_all(icc_data).unwrap();
+                enc.finish().unwrap()
+            },
+        );
+        let icc_id = doc.add_object(icc_stream);
+        Object::Array(vec![
+            Object::Name(b"ICCBased".to_vec()),
+            icc_id.into(),
+        ])
+    }
+
     for (i, result) in prepared.into_iter().enumerate() {
         let img = result?;
         let path = &images[i];
 
-        let (img_width, img_height, image_id) = match img {
+        let (img_width, img_height, img_dpi, image_id) = match img {
             PreparedImage::Jpeg {
                 width,
                 height,
                 components,
+                invert_cmyk,
                 data,
+                dpi: img_dpi,
+                icc_profile,
             } => {
-                let (color_space, decode) = match components {
-                    1 => (Object::Name(b"DeviceGray".to_vec()), None),
-                    3 => (Object::Name(b"DeviceRGB".to_vec()), None),
-                    4 => (
-                        Object::Name(b"DeviceCMYK".to_vec()),
-                        Some(Object::Array(vec![
-                            1.into(),
-                            0.into(),
-                            1.into(),
-                            0.into(),
-                            1.into(),
-                            0.into(),
-                            1.into(),
-                            0.into(),
-                        ])),
-                    ),
+                let color_space = match (&icc_profile, components) {
+                    (Some(icc), n) => make_icc_color_space(&mut doc, icc, n),
+                    (None, 1) => Object::Name(b"DeviceGray".to_vec()),
+                    (None, 3) => Object::Name(b"DeviceRGB".to_vec()),
+                    (None, 4) => Object::Name(b"DeviceCMYK".to_vec()),
                     _ => unreachable!(),
+                };
+                let decode = if invert_cmyk {
+                    Some(Object::Array(vec![
+                        1.into(), 0.into(),
+                        1.into(), 0.into(),
+                        1.into(), 0.into(),
+                        1.into(), 0.into(),
+                    ]))
+                } else {
+                    None
                 };
                 let mut dict = dictionary! {
                     "Type" => Object::Name(b"XObject".to_vec()),
@@ -286,81 +351,97 @@ pub fn merge_images(
                 if let Some(d) = decode {
                     dict.set("Decode", d);
                 }
-                (width, height, doc.add_object(Stream::new(dict, data)))
+                (width, height, img_dpi, doc.add_object(Stream::new(dict, data)))
             }
-            PreparedImage::PngPassthrough { info } => match info.color_type {
-                0 | 2 => {
-                    let channels: u8 = if info.color_type == 0 { 1 } else { 3 };
-                    let color_space = if info.color_type == 0 {
-                        Object::Name(b"DeviceGray".to_vec())
-                    } else {
-                        Object::Name(b"DeviceRGB".to_vec())
-                    };
-                    let decode_parms = dictionary! {
-                        "Predictor" => 15,
-                        "Colors" => channels as i64,
-                        "BitsPerComponent" => info.bit_depth as i64,
-                        "Columns" => info.width as i64,
-                    };
-                    let stream = Stream::new(
-                        dictionary! {
-                            "Type" => Object::Name(b"XObject".to_vec()),
-                            "Subtype" => Object::Name(b"Image".to_vec()),
-                            "Width" => info.width as i64,
-                            "Height" => info.height as i64,
-                            "ColorSpace" => color_space,
+            PreparedImage::PngPassthrough { info } => {
+                let img_dpi = info.dpi;
+                let icc_profile = info.icc_profile.clone();
+                let id = match info.color_type {
+                    0 | 2 => {
+                        let channels: u8 = if info.color_type == 0 { 1 } else { 3 };
+                        let color_space = match &icc_profile {
+                            Some(icc) => make_icc_color_space(&mut doc, icc, channels),
+                            None if info.color_type == 0 => {
+                                Object::Name(b"DeviceGray".to_vec())
+                            }
+                            None => Object::Name(b"DeviceRGB".to_vec()),
+                        };
+                        let decode_parms = dictionary! {
+                            "Predictor" => 15,
+                            "Colors" => channels as i64,
                             "BitsPerComponent" => info.bit_depth as i64,
-                            "Filter" => Object::Name(b"FlateDecode".to_vec()),
-                            "DecodeParms" => Object::Dictionary(decode_parms),
-                            "Length" => info.idat_data.len() as i64,
-                        },
-                        info.idat_data,
-                    );
-                    (info.width, info.height, doc.add_object(stream))
-                }
-                3 => {
-                    let num_entries = info.plte_data.len() / 3;
-                    let color_space = Object::Array(vec![
-                        Object::Name(b"Indexed".to_vec()),
-                        Object::Name(b"DeviceRGB".to_vec()),
-                        Object::Integer((num_entries - 1) as i64),
-                        Object::String(info.plte_data, lopdf::StringFormat::Hexadecimal),
-                    ]);
-                    let decode_parms = dictionary! {
-                        "Predictor" => 15,
-                        "Colors" => 1_i64,
-                        "BitsPerComponent" => info.bit_depth as i64,
-                        "Columns" => info.width as i64,
-                    };
-                    let stream = Stream::new(
-                        dictionary! {
-                            "Type" => Object::Name(b"XObject".to_vec()),
-                            "Subtype" => Object::Name(b"Image".to_vec()),
-                            "Width" => info.width as i64,
-                            "Height" => info.height as i64,
-                            "ColorSpace" => color_space,
+                            "Columns" => info.width as i64,
+                        };
+                        doc.add_object(Stream::new(
+                            dictionary! {
+                                "Type" => Object::Name(b"XObject".to_vec()),
+                                "Subtype" => Object::Name(b"Image".to_vec()),
+                                "Width" => info.width as i64,
+                                "Height" => info.height as i64,
+                                "ColorSpace" => color_space,
+                                "BitsPerComponent" => info.bit_depth as i64,
+                                "Filter" => Object::Name(b"FlateDecode".to_vec()),
+                                "DecodeParms" => Object::Dictionary(decode_parms),
+                                "Length" => info.idat_data.len() as i64,
+                            },
+                            info.idat_data,
+                        ))
+                    }
+                    3 => {
+                        let num_entries = info.plte_data.len() / 3;
+                        let base_cs: Object = match &icc_profile {
+                            Some(icc) => make_icc_color_space(&mut doc, icc, 3),
+                            None => Object::Name(b"DeviceRGB".to_vec()),
+                        };
+                        let color_space = Object::Array(vec![
+                            Object::Name(b"Indexed".to_vec()),
+                            base_cs,
+                            Object::Integer((num_entries - 1) as i64),
+                            Object::String(
+                                info.plte_data,
+                                lopdf::StringFormat::Hexadecimal,
+                            ),
+                        ]);
+                        let decode_parms = dictionary! {
+                            "Predictor" => 15,
+                            "Colors" => 1_i64,
                             "BitsPerComponent" => info.bit_depth as i64,
-                            "Filter" => Object::Name(b"FlateDecode".to_vec()),
-                            "DecodeParms" => Object::Dictionary(decode_parms),
-                            "Length" => info.idat_data.len() as i64,
-                        },
-                        info.idat_data,
-                    );
-                    (info.width, info.height, doc.add_object(stream))
-                }
-                _ => unreachable!(),
-            },
+                            "Columns" => info.width as i64,
+                        };
+                        doc.add_object(Stream::new(
+                            dictionary! {
+                                "Type" => Object::Name(b"XObject".to_vec()),
+                                "Subtype" => Object::Name(b"Image".to_vec()),
+                                "Width" => info.width as i64,
+                                "Height" => info.height as i64,
+                                "ColorSpace" => color_space,
+                                "BitsPerComponent" => info.bit_depth as i64,
+                                "Filter" => Object::Name(b"FlateDecode".to_vec()),
+                                "DecodeParms" => Object::Dictionary(decode_parms),
+                                "Length" => info.idat_data.len() as i64,
+                            },
+                            info.idat_data,
+                        ))
+                    }
+                    _ => unreachable!(),
+                };
+                (info.width, info.height, img_dpi, id)
+            }
             PreparedImage::Compressed {
                 width,
                 height,
                 color_channels,
                 color_compressed,
                 alpha_compressed,
+                dpi: img_dpi,
+                icc_profile,
             } => {
-                let color_space = if color_channels == 1 {
-                    Object::Name(b"DeviceGray".to_vec())
-                } else {
-                    Object::Name(b"DeviceRGB".to_vec())
+                let color_space = match &icc_profile {
+                    Some(icc) => make_icc_color_space(&mut doc, icc, color_channels),
+                    None if color_channels == 1 => {
+                        Object::Name(b"DeviceGray".to_vec())
+                    }
+                    None => Object::Name(b"DeviceRGB".to_vec()),
                 };
                 let image_stream = if let Some(alpha_data) = alpha_compressed {
                     let smask_stream = Stream::new(
@@ -406,29 +487,27 @@ pub fn merge_images(
                         color_compressed,
                     )
                 };
-                (width, height, doc.add_object(image_stream))
+                (width, height, img_dpi, doc.add_object(image_stream))
             }
         };
 
-        // page dimensions
+        let effective_dpi = cli_dpi.or(img_dpi).unwrap_or(300);
         let (page_w_pts, page_h_pts, img_w_pts, img_h_pts, x_off, y_off) =
             if let Some(ps) = pagesize {
-                // Scale image to fit within the page, maintaining aspect ratio
                 let (pw, ph) = ps.dimensions_pt();
-                let img_w = img_width as f32 * 72.0 / dpi as f32;
-                let img_h = img_height as f32 * 72.0 / dpi as f32;
+                let img_w = img_width as f32 * 72.0 / effective_dpi as f32;
+                let img_h = img_height as f32 * 72.0 / effective_dpi as f32;
                 let scale = (pw / img_w).min(ph / img_h);
                 let w = img_w * scale;
                 let h = img_h * scale;
                 (pw, ph, w, h, (pw - w) / 2.0, (ph - h) / 2.0)
             } else {
-                // Page sized to image at given DPI
-                let w = img_width as f32 * 72.0 / dpi as f32;
-                let h = img_height as f32 * 72.0 / dpi as f32;
+                let w = img_width as f32 * 72.0 / effective_dpi as f32;
+                let h = img_height as f32 * 72.0 / effective_dpi as f32;
                 (w, h, w, h, 0.0, 0.0)
             };
 
-        // content stream, scale image to page size and draw
+        // content stream
         let content = Content {
             operations: vec![
                 Operation::new("q", vec![]),
@@ -493,8 +572,45 @@ pub fn merge_images(
     doc.trailer.set("Root", catalog_id);
 
     // PDF metadata
-    if title.is_some() || author.is_some() {
+    {
         let mut info_dict = lopdf::Dictionary::new();
+        info_dict.set(
+            "Producer",
+            Object::String(
+                format!("ovid {}", env!("CARGO_PKG_VERSION")).into_bytes(),
+                lopdf::StringFormat::Literal,
+            ),
+        );
+        // PDF date format: D:YYYYMMDDHHmmSS+HH'mm'
+        let now = std::time::SystemTime::now();
+        if let Ok(dur) = now.duration_since(std::time::UNIX_EPOCH) {
+            let secs = dur.as_secs();
+            // simple UTC breakdown without external crate
+            let days = secs / 86400;
+            let time_of_day = secs % 86400;
+            let hours = time_of_day / 3600;
+            let minutes = (time_of_day % 3600) / 60;
+            let seconds = time_of_day % 60;
+            // date from days since epoch (civil calendar algorithm)
+            let z = days + 719468;
+            let era = z / 146097;
+            let doe = z - era * 146097;
+            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+            let y = yoe + era * 400;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = doy - (153 * mp + 2) / 5 + 1;
+            let m = if mp < 10 { mp + 3 } else { mp - 9 };
+            let y = if m <= 2 { y + 1 } else { y };
+            let date_str = format!(
+                "D:{:04}{:02}{:02}{:02}{:02}{:02}Z",
+                y, m, d, hours, minutes, seconds
+            );
+            info_dict.set(
+                "CreationDate",
+                Object::String(date_str.into_bytes(), lopdf::StringFormat::Literal),
+            );
+        }
         if let Some(t) = title {
             info_dict.set(
                 "Title",
