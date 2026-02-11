@@ -69,6 +69,9 @@ ovid merge ./scanned_pages/ -o combined.pdf
 # Set page size (scales images to fit, centered)
 ovid merge photos/*.jpg -o album.pdf --pagesize a4
 
+# Page orientation (auto detects from image, or force portrait/landscape)
+ovid merge photos/*.jpg -o album.pdf --pagesize a4 --orientation landscape
+
 # Add PDF metadata
 ovid merge slides/*.png -o presentation.pdf --title "My Slides" --author "Jane Doe"
 
