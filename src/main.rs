@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-use parse::{ImageFormat, PageSize, PngCompression};
+use parse::{ImageFormat, Orientation, PageSize, PngCompression};
 
 #[derive(Parser)]
 #[command(name = "ovid", version, about = "Lightning-fast PDF / Image converter")]
@@ -85,6 +85,10 @@ enum Commands {
         /// page size (overrides DPI-based sizing, scales image to fit)
         #[arg(long)]
         pagesize: Option<PageSize>,
+
+        /// page orientation: auto (from image aspect ratio), portrait, landscape
+        #[arg(long, default_value_t = Orientation::Auto)]
+        orientation: Orientation,
     },
     /// generate shell completions
     Completions {
@@ -141,6 +145,7 @@ fn main() -> Result<()> {
             title,
             author,
             pagesize,
+            orientation,
         } => {
             let images = parse::expand_image_paths(&images)?;
             anyhow::ensure!(!images.is_empty(), "No input images provided");
@@ -152,6 +157,7 @@ fn main() -> Result<()> {
                 title.as_deref(),
                 author.as_deref(),
                 pagesize,
+                orientation,
             )?;
         }
         Commands::Completions { shell } => {

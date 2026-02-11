@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::parse::{parse_jpeg_header, parse_png_header, PageSize, PngInfo};
+use crate::parse::{parse_jpeg_header, parse_png_header, Orientation, PageSize, PngInfo};
 
 /// pre-processed image data ready for PDF insertion
 enum PreparedImage {
@@ -261,6 +261,7 @@ pub fn merge_images(
     title: Option<&str>,
     author: Option<&str>,
     pagesize: Option<PageSize>,
+    orientation: Orientation,
 ) -> Result<()> {
     use lopdf::content::{Content, Operation};
     use lopdf::{dictionary, Document, Object, Stream};
@@ -497,6 +498,17 @@ pub fn merge_images(
                 let (pw, ph) = ps.dimensions_pt();
                 let img_w = img_width as f32 * 72.0 / effective_dpi as f32;
                 let img_h = img_height as f32 * 72.0 / effective_dpi as f32;
+                let (pw, ph) = match orientation {
+                    Orientation::Auto => {
+                        if img_w > img_h {
+                            (pw.max(ph), pw.min(ph))
+                        } else {
+                            (pw.min(ph), pw.max(ph))
+                        }
+                    }
+                    Orientation::Portrait => (pw.min(ph), pw.max(ph)),
+                    Orientation::Landscape => (pw.max(ph), pw.min(ph)),
+                };
                 let scale = (pw / img_w).min(ph / img_h);
                 let w = img_w * scale;
                 let h = img_h * scale;

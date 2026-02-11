@@ -37,6 +37,24 @@ impl PageSize {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum Orientation {
+    #[default]
+    Auto,
+    Portrait,
+    Landscape,
+}
+
+impl std::fmt::Display for Orientation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Orientation::Auto => write!(f, "auto"),
+            Orientation::Portrait => write!(f, "portrait"),
+            Orientation::Landscape => write!(f, "landscape"),
+        }
+    }
+}
+
 /// parse page range string like "1,3-5,10" into 0-indexed page indices
 pub fn parse_page_ranges(s: &str, num_pages: i32) -> Result<Vec<i32>> {
     let mut pages = Vec::new();
